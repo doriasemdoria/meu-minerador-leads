@@ -19,15 +19,15 @@ preparar_navegador()
 
 # --- INTERFACE ---
 st.set_page_config(page_title="Lead Miner Pro", page_icon="🎯", layout="wide")
-st.title("🎯 Lead Miner Pro - Versão Global")
+st.title("🎯 Lead Miner Pro - Ajuste de Performance")
 
 with st.sidebar:
     st.header("⚙️ Configurações")
     termos_raw = st.text_area("Termos", "Ortopedista\nDentista")
     cidades_raw = st.text_area("Locais (Bairros)", "Moema Sao Paulo\nTatuape Sao Paulo")
     excluir_raw = st.text_area("Palavras para Excluir", "hospital\npublico")
-    concorrencia = st.slider("Buscas Simultâneas", 1, 3, 1) # Reduzi para 1 para evitar bloqueio
-    max_rolagens = st.number_input("Rolagens", 5, 100, 30)
+    concorrencia = st.slider("Buscas Simultâneas", 1, 2, 1) 
+    max_rolagens = st.number_input("Rolagens", 5, 100, 25)
 
 TERMOS = [t.strip() for t in termos_raw.split('\n') if t.strip()]
 CIDADES = [c.strip() for c in cidades_raw.split('\n') if c.strip()]
@@ -43,7 +43,7 @@ async def extrair_contato(card, page):
         if tels: return tels[0]
         
         await card.click()
-        await asyncio.sleep(2) # Mais tempo para carregar detalhes
+        await asyncio.sleep(1.5) 
         painel = await page.query_selector('[role="main"]')
         if painel:
             texto_painel = await painel.inner_text()
@@ -58,37 +58,37 @@ async def executar_busca(context, setor, cidade, vistos, todos_leads, lock, stat
     page = await context.new_page()
     
     try:
-        # URL DIRETA E ROBUSTA
+        # URL direta
         url = f"https://www.google.com/maps/search/{busca.replace(' ', '+')}"
-        await page.goto(url, wait_until="networkidle", timeout=60000)
         
-        # Tenta aceitar cookies/termos se aparecerem (comum em servidores)
+        # MUDANÇA AQUI: wait_until="domcontentloaded" é muito mais rápido
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        
+        # Espera um seletor específico (os cards) em vez da rede toda
         try:
-            for btn in await page.query_selector_all("button"):
-                txt = await btn.inner_text()
-                if "Aceitar" in txt or "Agree" in txt:
-                    await btn.click()
-        except: pass
+            await page.wait_for_selector('div[role="article"]', timeout=15000)
+        except:
+            pass # Se não achar em 15s, tenta seguir assim mesmo
 
-        # Espera a lista de resultados carregar
-        await asyncio.sleep(5) 
-        
-        # Lógica de Scroll
+        # Lógica de Scroll mais "agressiva"
         for _ in range(max_rolagens):
-            # Tenta rolar qualquer área que pareça uma lista de resultados
-            await page.mouse.wheel(0, 2000)
-            await asyncio.sleep(1)
+            # Tenta focar no feed antes de rolar
+            feed = await page.query_selector('[role="feed"]')
+            if feed:
+                await feed.focus()
+                await page.mouse.wheel(0, 3000)
+            else:
+                await page.mouse.wheel(0, 3000)
+            await asyncio.sleep(0.6)
             
-        # Pega todos os cards de estabelecimentos
-        cards = await page.query_selector_all('div[role="article"], a[href*="/maps/place/"]')
+        cards = await page.query_selector_all('div[role="article"]')
         
         for card in cards:
             try:
                 nome = await card.get_attribute("aria-label")
                 if not nome:
-                    # Tenta pegar o nome de dentro do texto do card
-                    nome = await card.inner_text()
-                    nome = nome.split('\n')[0]
+                    txt = await card.inner_text()
+                    nome = txt.split('\n')[0]
 
                 if not nome or any(p in nome.lower() for p in PALAVRAS_EXCLUIR):
                     continue
@@ -101,7 +101,7 @@ async def executar_busca(context, setor, cidade, vistos, todos_leads, lock, stat
                     if chave not in vistos:
                         vistos.add(chave)
                         todos_leads.append({
-                            "Nome": nome[:50], # Limita tamanho do nome
+                            "Nome": nome[:60],
                             "Telefone_API": f"55{tel_limpo}" if len(tel_limpo) >= 10 else "Incompleto",
                             "Setor": setor,
                             "Cidade": cidade
@@ -121,7 +121,6 @@ async def engine():
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        # Contexto com cara de usuário real
         context = await browser.new_context(
             viewport={'width': 1280, 'height': 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -147,6 +146,6 @@ if st.button("🚀 Iniciar Mineração"):
                 st.dataframe(df)
                 st.download_button("📥 Baixar CSV", df.to_csv(index=False, encoding='utf-8-sig'), "leads.csv")
             else:
-                st.warning("Ainda sem resultados. O Google pode estar bloqueando o IP do servidor. Tente novamente em instantes ou mude o bairro.")
+                st.warning("Nenhum lead encontrado. Tente mudar o bairro ou remover palavras de exclusão.")
         except Exception as e:
             st.error(f"Erro: {e}")
