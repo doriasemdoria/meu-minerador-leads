@@ -11,3 +11,5 @@ libgbm1
 libasound2
 libpangocairo-1.0-0
 libpango-1.0-0
+libxfixes3
+libxshmfence1
