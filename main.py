@@ -8,116 +8,112 @@ import io
 from playwright.async_api import async_playwright
 
 # ============================================================
-# 1. INSTALAÇÃO AUTOMÁTICA (ESSENCIAL PARA NUVEM)
+# 1. PREPARAÇÃO DO AMBIENTE (NUVEM)
 # ============================================================
 def preparar_navegador():
-    """Garante que o Chromium e as dependências estejam instalados no servidor."""
+    """Instala apenas o executável do Chromium no servidor."""
     if 'navegador_pronto' not in st.session_state:
         try:
-            # Tenta instalar o chromium
+            # Comando simples: apenas baixa o binário do Chrome
             subprocess.run(["playwright", "install", "chromium"], check=True)
-            # Instala dependências de sistema (linux)
-            subprocess.run(["playwright", "install-deps"], check=True)
             st.session_state['navegador_pronto'] = True
         except Exception as e:
-            st.error(f"Erro ao preparar navegador: {e}")
+            st.error(f"Erro ao baixar executável do Chrome: {e}")
 
-# Executa a preparação assim que o app abre
+# Inicia a preparação assim que o site carrega
 preparar_navegador()
 
 # ============================================================
-# 2. CONFIGURAÇÕES DA INTERFACE
+# 2. INTERFACE DO USUÁRIO (STREAMLIT)
 # ============================================================
 st.set_page_config(page_title="Lead Miner Pro", page_icon="🎯", layout="wide")
 
 st.title("🎯 Lead Miner Pro - Google Maps")
-st.markdown("Gere listas de leads qualificadas para campanhas de tráfego pago.")
+st.markdown("Extraia contatos reais para audiências de tráfego pago ou prospecção direta.")
 
 with st.sidebar:
-    st.header("⚙️ Configurações de Busca")
+    st.header("⚙️ Configurações")
     
-    termos_raw = st.text_area("Termos de Pesquisa (um por linha)", 
-                             "Ginecologista\nObstetrícia\nClínica de Ginecologia")
+    termos_raw = st.text_area("Termos (um por linha)", 
+                             "Ginecologista\nObstetrícia")
     
-    cidades_raw = st.text_area("Cidades/Bairros (um por linha)", 
+    cidades_raw = st.text_area("Locais/Bairros (um por linha)", 
                               "Moema Sao Paulo\nIpiranga Sao Paulo")
     
-    excluir_raw = st.text_area("Palavras para Excluir do Nome", 
+    excluir_raw = st.text_area("Palavras para Excluir", 
                               "hospital\npublico\nuniversidade")
     
     st.divider()
-    concorrencia = st.slider("Buscas Simultâneas (Abas)", 1, 4, 1)
-    max_rolagens = st.number_input("Máximo de Rolagens por Busca", 5, 100, 20)
+    concorrencia = st.slider("Buscas Simultâneas", 1, 4, 1)
+    max_rolagens = st.number_input("Rolagens de Página", 5, 100, 20)
 
-# Processamento das listas de entrada
+# Tratamento dos inputs
 TERMOS = [t.strip() for t in termos_raw.split('\n') if t.strip()]
 CIDADES = [c.strip() for c in cidades_raw.split('\n') if c.strip()]
 PALAVRAS_EXCLUIR = [p.strip().lower() for p in excluir_raw.split('\n') if p.strip()]
 
 # ============================================================
-# 3. LÓGICA DE MINERAÇÃO (ASYNC)
+# 3. NÚCLEO DO ROBÔ (SCRAPING)
 # ============================================================
 PADRAO_TEL = re.compile(r'\(?\d{2}\)?\s?9?\d{4,5}[\s-]?\d{4}')
 
-async def bloquear_recursos(route):
-    """Bloqueia imagens e mídia para economizar banda e memória do servidor."""
+async def bloquear_lixo(route):
+    """Bloqueia imagens e vídeos para o site carregar mais rápido."""
     if route.request.resource_type in ("image", "font", "media"):
         await route.abort()
     else:
         await route.continue_()
 
-async def extrair_telefone(card, page):
-    """Tenta extrair o telefone do card ou abrindo os detalhes."""
+async def extrair_contato(card, page):
+    """Tenta pegar o telefone direto do card ou clicando nele."""
     try:
-        # Tenta no card primeiro
+        # Tenta no card visível
         texto = await card.inner_text()
         tels = PADRAO_TEL.findall(texto)
         if tels: return tels[0]
         
-        # Clica para abrir detalhes
+        # Se não achou, clica no card
         await card.click()
-        await asyncio.sleep(1.5)
-        detalhes = await page.query_selector('[role="main"]')
-        if detalhes:
-            texto_detalhes = await detalhes.inner_text()
-            tels = PADRAO_TEL.findall(texto_detalhes)
+        await asyncio.sleep(1.2) # Delay humano
+        painel = await page.query_selector('[role="main"]')
+        if painel:
+            texto_painel = await painel.inner_text()
+            tels = PADRAO_TEL.findall(texto_painel)
             if tels: return tels[0]
     except: pass
     return "Não listado"
 
-async def processar_cidade(context, setor, cidade, vistos, todos_leads, lock, status_placeholder):
+async def executar_busca(context, setor, cidade, vistos, todos_leads, lock, status):
     busca = f"{setor} em {cidade}"
-    status_placeholder.write(f"🔎 Processando: **{busca}**")
+    status.write(f"🔎 Minerando: **{busca}**")
     
     page = await context.new_page()
-    await page.route("**/*", bloquear_recursos)
+    await page.route("**/*", bloquear_lixo)
     
     try:
         url = f"https://www.google.com/maps/search/{busca.replace(' ', '+')}"
         await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         
-        # Scroll para carregar resultados
+        # Scroll lateral
         for _ in range(max_rolagens):
             feed = await page.query_selector('[role="feed"]')
             if feed:
-                await page.evaluate("document.querySelector('[role=\"feed\"]').scrollTop += 2000")
-                await asyncio.sleep(0.8)
+                await page.evaluate("document.querySelector('[role=\"feed\"]').scrollTop += 1500")
+                await asyncio.sleep(0.7)
             else: break
             
         cards = await page.query_selector_all('div[role="article"]')
         
         for card in cards:
             nome = await card.get_attribute("aria-label")
-            if not nome: continue
-            
-            # Filtro de exclusão
-            if any(p in nome.lower() for p in PALAVRAS_EXCLUIR):
+            if not nome or any(p in nome.lower() for p in PALAVRAS_EXCLUIR):
                 continue
                 
-            tel = await extrair_telefone(card, page)
+            tel = await extrair_contato(card, page)
             tel_limpo = re.sub(r'\D', '', tel)
             
             async with lock:
+                # Evita duplicados por telefone ou nome
                 chave = ("tel", tel_limpo) if len(tel_limpo) >= 10 else ("nome", nome.lower())
                 if chave not in vistos:
                     vistos.add(chave)
@@ -125,35 +121,35 @@ async def processar_cidade(context, setor, cidade, vistos, todos_leads, lock, st
                         "Setor": setor,
                         "Nome": nome,
                         "Telefone": tel,
-                        "WhatsApp_Link": f"https://wa.me/55{tel_limpo}" if len(tel_limpo) >= 10 else "N/A",
-                        "Cidade/Bairro": cidade
+                        "WhatsApp": f"https://wa.me/55{tel_limpo}" if len(tel_limpo) >= 10 else "-",
+                        "Bairro/Cidade": cidade
                     })
     finally:
         await page.close()
 
-async def minerar_tudo():
+async def engine():
     vistos = set()
     todos_leads = []
     lock = asyncio.Lock()
     semaforo = asyncio.Semaphore(concorrencia)
     
-    container_status = st.empty()
+    log_area = st.empty()
     progresso = st.progress(0)
     
-    buscas = [(s, c) for s in TERMOS for c in CIDADES]
-    total = len(buscas)
+    lista_tarefas = [(s, c) for s in TERMOS for c in CIDADES]
+    total = len(lista_tarefas)
     
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True) # Headless obrigatório em nuvem
+        browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
         )
         
         tasks = []
-        for i, (setor, cidade) in enumerate(buscas):
+        for i, (setor, cidade) in enumerate(lista_tarefas):
             async def wrapper(s, c, idx):
                 async with semaforo:
-                    await processar_cidade(context, s, c, vistos, todos_leads, lock, container_status)
+                    await executar_busca(context, s, c, vistos, todos_leads, lock, log_area)
                     progresso.progress((idx + 1) / total)
             
             tasks.append(wrapper(setor, cidade, i))
@@ -164,34 +160,32 @@ async def minerar_tudo():
     return todos_leads
 
 # ============================================================
-# 4. EXECUÇÃO E DOWNLOAD
+# 4. DISPARO E RESULTADOS
 # ============================================================
 if st.button("🚀 Iniciar Mineração"):
     if not TERMOS or not CIDADES:
-        st.warning("Por favor, preencha pelo menos um termo e uma cidade.")
+        st.error("Preencha os termos e cidades na barra lateral!")
     else:
-        with st.spinner("Minerando... Isso pode levar alguns minutos."):
+        with st.spinner("O robô está trabalhando..."):
             try:
-                # Resolve o problema de loop de eventos do asyncio no Streamlit
+                # Garante que o loop do asyncio funcione no Streamlit
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                resultados = loop.run_until_complete(minerar_tudo())
+                resultado_final = loop.run_until_complete(engine())
                 
-                if resultados:
-                    df = pd.DataFrame(resultados)
-                    st.success(f"Busca finalizada! {len(df)} leads capturados.")
-                    st.dataframe(df)
+                if resultado_final:
+                    df = pd.DataFrame(resultado_final)
+                    st.success(f"Sucesso! {len(df)} leads encontrados.")
+                    st.dataframe(df, use_container_width=True)
                     
-                    # Botão de download
-                    csv_io = io.StringIO()
-                    df.to_csv(csv_io, index=False, encoding='utf-8-sig')
+                    csv = df.to_csv(index=False, encoding='utf-8-sig')
                     st.download_button(
-                        label="📥 Baixar Lista para Tráfego Pago",
-                        data=csv_io.getvalue(),
-                        file_name="leads_google_maps.csv",
+                        label="📥 Baixar Planilha CSV",
+                        data=csv,
+                        file_name="leads_extraidos.csv",
                         mime="text/csv"
                     )
                 else:
-                    st.error("Nenhum resultado encontrado. Tente termos menos restritivos.")
+                    st.warning("Nenhum lead encontrado com esses critérios.")
             except Exception as e:
-                st.error(f"Ocorreu um erro crítico: {e}")
+                st.error(f"Erro durante a execução: {e}")
